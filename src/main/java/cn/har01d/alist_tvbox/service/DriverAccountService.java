@@ -366,7 +366,7 @@ public class DriverAccountService {
     }
 
     public void updateToken(Integer id, DriverAccount dto) {
-        log.debug("update token: {} {}", id - IDX, dto);
+        log.debug("update token: accountId={}", id - IDX);
         var account = get(id - IDX);
         if (account.getType() == DriverType.OPEN123 || account.getType() == DriverType.GUANGYA) {
             // Go 刷新后同步回来的是 refresh_token(可能轮换),写回 addition.refresh_token。

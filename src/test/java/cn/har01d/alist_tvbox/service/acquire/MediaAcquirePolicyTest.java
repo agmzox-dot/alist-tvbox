@@ -74,6 +74,15 @@ class MediaAcquirePolicyTest {
     }
 
     @Test
+    void eightyGibSeasonIsAllowedWhenTargetEpisodeFits() {
+        var candidate = candidate("Show S01", new MagnetResolver.MagnetInfo(
+                "hash", "Show S01", 80 * MediaAcquirePolicy.GIB,
+                List.of(new MagnetResolver.MagnetFile("Show.S01E03.mkv", 12 * MediaAcquirePolicy.GIB))));
+
+        assertTrue(policy.scoreTv("Show", 1, 3, candidate).accepted());
+    }
+
+    @Test
     void tvTargetEpisodeOverTwentyGibIsRejected() {
         var candidate = candidate("Show S01", new MagnetResolver.MagnetInfo(
                 "hash", "Show S01", 21 * MediaAcquirePolicy.GIB,
@@ -83,6 +92,44 @@ class MediaAcquirePolicyTest {
 
         assertTrue(result.rejected());
         assertTrue(result.reasons().stream().anyMatch(reason -> reason.contains("目标单集超过20GiB")));
+    }
+
+    @Test
+    void tvTorrentWithOtherRecognizedEpisodesButNoTargetIsRejected() {
+        var candidate = candidate("Show S01", new MagnetResolver.MagnetInfo(
+                "hash", "Show S01", 24 * MediaAcquirePolicy.GIB,
+                List.of(new MagnetResolver.MagnetFile("Show.S01E01.mkv", 12 * MediaAcquirePolicy.GIB),
+                        new MagnetResolver.MagnetFile("Show.S01E02.mkv", 12 * MediaAcquirePolicy.GIB))));
+
+        assertTrue(policy.scoreTv("Show", 1, 3, candidate).rejected());
+    }
+
+    @Test
+    void tvTorrentWithoutRecognizableEpisodeNumberIsAcceptedButDowngraded() {
+        var candidate = candidate("Show season pack", new MagnetResolver.MagnetInfo(
+                "hash", "Show season pack", 80 * MediaAcquirePolicy.GIB,
+                List.of(new MagnetResolver.MagnetFile("Show.video.mkv", 12 * MediaAcquirePolicy.GIB))));
+
+        var result = policy.scoreTv("Show", 1, 3, candidate);
+
+        assertTrue(result.accepted());
+        assertTrue(result.reasons().stream().anyMatch(reason -> reason.contains("无法识别集号")));
+        var resolved = candidate.withMetadata(new MagnetResolver.MagnetInfo("hash", "Show S01E03 1080P",
+                12 * MediaAcquirePolicy.GIB,
+                List.of(new MagnetResolver.MagnetFile("Show.S01E03.1080p.mkv", 12 * MediaAcquirePolicy.GIB))));
+        assertTrue(result.value() < policy.scoreTv("Show", 1, 3, resolved).value());
+    }
+
+    @Test
+    void tvTorrentFromAnotherRecognizedSeasonIsRejected() {
+        var candidate = candidate("Show S02", new MagnetResolver.MagnetInfo(
+                "hash", "Show S02", 12 * MediaAcquirePolicy.GIB,
+                List.of(new MagnetResolver.MagnetFile("Show.S02E03.mkv", 12 * MediaAcquirePolicy.GIB))));
+
+        var result = policy.scoreTv("Show", 1, 3, candidate);
+
+        assertTrue(result.rejected());
+        assertTrue(result.reasons().contains("明显错误季"));
     }
 
     @Test

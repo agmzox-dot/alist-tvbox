@@ -17,4 +17,12 @@ class MediaIdentityTest {
         assertEquals("movie", movie.mediaType());
         assertEquals("tv", tv.mediaType());
     }
+
+    @Test
+    void episodeKeyUsesStableTmdbTvFormatWithoutChangingBaseIdentity() {
+        assertEquals("tmdb:tv:1399:s2:e7", MediaIdentity.episodeKey("tmdb", "tv", "1399", 2, 7));
+        assertEquals("tmdb:tv:1399", MediaIdentity.tv(1399).key());
+        assertEquals(null, MediaIdentity.episodeKey("douban", "tv", "1399", 2, 7));
+        assertEquals(null, MediaIdentity.episodeKey("tmdb", "tv", "", 2, 7));
+    }
 }

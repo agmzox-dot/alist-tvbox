@@ -1,5 +1,7 @@
 package cn.har01d.alist_tvbox.service.acquire;
 
+import org.apache.commons.lang3.StringUtils;
+
 import java.util.Objects;
 
 /** Stable media identity. The media type is part of the key by design. */
@@ -29,6 +31,16 @@ public record MediaIdentity(String provider, String mediaType, String id) {
 
     public static MediaIdentity tv(int id) {
         return tmdb("tv", id);
+    }
+
+    /** Episode identity is deliberately separate from the three-part media identity parser. */
+    public static String episodeKey(String provider, String mediaType, String id, Integer season, Integer episode) {
+        if (!"tmdb".equalsIgnoreCase(provider) || !"tv".equalsIgnoreCase(mediaType)
+                || StringUtils.isBlank(id) || !id.trim().matches("\\d+")
+                || season == null || season < 1 || episode == null || episode < 1) {
+            return null;
+        }
+        return "tmdb:tv:" + id.trim() + ":s" + season + ":e" + episode;
     }
 
     public static MediaIdentity parse(String key) {

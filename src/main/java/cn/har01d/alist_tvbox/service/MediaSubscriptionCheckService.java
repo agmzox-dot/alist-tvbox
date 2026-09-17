@@ -40,6 +40,9 @@ import cn.har01d.alist_tvbox.model.FsResponse;
 import cn.har01d.alist_tvbox.service.metadata.DoubanSeasonAligner;
 import cn.har01d.alist_tvbox.service.metadata.TencentSeasonAligner;
 import cn.har01d.alist_tvbox.service.metadata.MetadataService;
+import cn.har01d.alist_tvbox.service.acquire.MediaAcquireCandidate;
+import cn.har01d.alist_tvbox.service.acquire.MediaAcquirePolicy;
+import cn.har01d.alist_tvbox.service.acquire.MediaIdentity;
 import cn.har01d.alist_tvbox.service.sitesearch.GuanYingSearchService;
 import cn.har01d.alist_tvbox.service.sitesearch.PanLianSearchService;
 import cn.har01d.alist_tvbox.service.sitesearch.PanjuSearchService;
@@ -391,6 +394,7 @@ public class MediaSubscriptionCheckService {
     /** 搜索顺手收下的磁力候选(订阅 id → 候选,按 link 去重,上限 50):巡检搜索每轮都带磁力结果,
      *  磁力兜底优先消费这里,专项搜索只作兜底 —— 不为磁力单独打一轮搜索 */
     private final Map<Integer, List<cn.har01d.alist_tvbox.dto.tg.Message>> magnetCandidates = new ConcurrentHashMap<>();
+    private final MediaAcquirePolicy mediaAcquirePolicy = new MediaAcquirePolicy();
     /** 同关键词补池去重(订阅 id → 关键词 → 上次搜索时间):一次巡检内 ensureSource/fillGaps/ensureMainDrives
      *  三个机制各自判定"需要补池",用的却都是订阅词(线上:一念永恒 id=66 一轮巡检连发 3 次同词
      *  全量搜索,结果集几乎相同,每轮还附带 ~450 条盘检)。窗口内同词直接跳过;单集降级词、
@@ -4803,42 +4807,70 @@ public class MediaSubscriptionCheckService {
         EpisodeSizePolicy policy = episodeSizePolicy(subscription);
         MediaSubscriptionPoolFilter global = poolFilterFor(subscription);
         MediaSubscriptionFilter filter = parseFilter(subscription);
-        int attempts = 0;
+        List<ScoredMagnet> ranked = new ArrayList<>();
         for (cn.har01d.alist_tvbox.dto.tg.Message message : magnets) {
             if (message == null || !isOfflineLink(message.getLink())) {
                 continue;
             }
             String title = magnetTitle(message);
-            // 标题级资源筛选规则(dn 名):排除词(订阅+全局并集)/全局包含词/清晰度门槛,与入池同口径
+            // 标题级资源筛选规则(dn 名):排除词(订阅+全局并集)/全局包含词/清晰度门槛
             if (magnetExcluded(title, filter, global)) {
                 continue;
             }
             if (!names.isEmpty() && !matchesTitle(names, title)) {
                 continue;
             }
+
+            cn.har01d.alist_tvbox.service.magnet.MagnetResolver.MagnetInfo info = null;
+            if (magnetResolver != null) {
+                try {
+                    var resolved = magnetResolver.resolve(message.getLink());
+                    info = resolved == null ? null : resolved.orElse(null);
+                } catch (Exception e) {
+                    log.debug("magnet metadata unavailable for subscription {} episode {}: {}",
+                            subscription.getId(), episode, e.getMessage());
+                }
+            }
+            MediaAcquireCandidate candidate = new MediaAcquireCandidate("subscription", title, message.getLink(), info);
+            MediaAcquirePolicy.Score mediaScore = mediaAcquirePolicy.scoreTv(
+                    subscription.getName(), subscription.getSeason(), episode, candidate);
+            if (!mediaScore.accepted()) {
+                log.info("skip magnet candidate for subscription {} episode {}: reasons={}",
+                        subscription.getId(), episode, mediaScore.reasons());
+                continue;
+            }
+            // 保留追剧既有的自定义单集体积/排除词规则,MediaAcquirePolicy 负责通用单集20GiB闸门与排名。
+            if (info != null && !magnetFilesAcceptable(subscription, info, episode, policy, filter, global)) {
+                continue;
+            }
+            if (info == null) {
+                // 解析服务暂时不可用时保留标题能确认的候选;明显冲突的集号仍剔除。
+                Integer parsed = parseMagnetEpisode(title, subscription);
+                if (parsed != null && parsed != episode) {
+                    continue;
+                }
+            }
+            ranked.add(new ScoredMagnet(message, mediaScore));
+        }
+        ranked.sort(Comparator.comparingInt((ScoredMagnet value) -> value.score().value()).reversed()
+                .thenComparing(value -> value.message().getLink(), String.CASE_INSENSITIVE_ORDER));
+
+        int attempts = 0;
+        for (ScoredMagnet scored : ranked) {
+            cn.har01d.alist_tvbox.dto.tg.Message message = scored.message();
             // 每候选提交同步等待最长 30s:全部被网盘拒绝时逐个试会把共享 check 池阻塞数分钟 —— 尝试上限兜底
             if (attempts >= 3) {
                 log.info("magnet submit attempts reached cap for subscription {} episode {}", subscription.getId(), episode);
                 return false;
             }
             attempts++;
-            // 磁力解析:文件列表级预筛(真实体积+集号命中+文件名排除词);失败降级 dn 名口径
-            cn.har01d.alist_tvbox.service.magnet.MagnetResolver.MagnetInfo info =
-                    magnetResolver == null ? null : magnetResolver.resolve(message.getLink()).orElse(null);
-            if (info != null) {
-                if (!magnetFilesAcceptable(subscription, info, episode, policy, filter, global)) {
-                    continue;
-                }
-            } else {
-                // tg-search 磁力条目 size 恒 0,体积门禁无意义跳过;靠 dn 名集号兜底
-                Integer parsed = parseMagnetEpisode(title, subscription);
-                if (parsed == null || parsed != episode) {
-                    continue;
-                }
-            }
-            cn.har01d.alist_tvbox.model.MagnetSubmitResult result =
-                    offlineDownloadService.submitMagnet(message.getLink(), subscription.getId(), episode,
-                            appProperties.getSubscription().getMagnetSubmitTimeoutSeconds());
+            String mediaKey = MediaIdentity.episodeKey("tmdb", "tv", subscription.getMetaId(),
+                    subscription.getSeason(), episode);
+            cn.har01d.alist_tvbox.model.MagnetSubmitResult result = StringUtils.isBlank(mediaKey)
+                    ? offlineDownloadService.submitMagnet(message.getLink(), subscription.getId(), episode,
+                    appProperties.getSubscription().getMagnetSubmitTimeoutSeconds())
+                    : offlineDownloadService.submitMagnet(message.getLink(), subscription.getId(), episode,
+                    appProperties.getSubscription().getMagnetSubmitTimeoutSeconds(), mediaKey);
             if (cn.har01d.alist_tvbox.model.MagnetSubmitResult.COMPLETED.equals(result.status())) {
                 harvestCompletedProduct(subscription, result.taskName());
                 return true;
@@ -4874,7 +4906,15 @@ public class MediaSubscriptionCheckService {
                                    cn.har01d.alist_tvbox.service.magnet.MagnetResolver.MagnetInfo info,
                                    int episode, EpisodeSizePolicy policy,
                                    MediaSubscriptionFilter filter, MediaSubscriptionPoolFilter global) {
+        MediaAcquireCandidate candidate = new MediaAcquireCandidate("subscription", subscription.getName(), "", info);
+        MediaAcquirePolicy.Score mediaScore = mediaAcquirePolicy.scoreTv(
+                subscription.getName(), subscription.getSeason(), episode, candidate);
+        if (!mediaScore.accepted()) {
+            return false;
+        }
         Integer season = subscription.getSeason();
+        boolean sawVideo = false;
+        boolean sawIdentifiedEpisode = false;
         for (cn.har01d.alist_tvbox.service.magnet.MagnetResolver.MagnetFile file : info.files()) {
             // substringAfterLast 找不到分隔符返回空串,根级文件(无目录前缀)要保留全名
             String filePath = file.path();
@@ -4883,13 +4923,24 @@ public class MediaSubscriptionCheckService {
             if (!isMediaFormat(fileName) || EXTRA.matcher(fileName).find()) {
                 continue;
             }
+            sawVideo = true;
             if (magnetExcluded(fileName, filter, global)) {
                 continue; // 文件名命中排除词:该文件不可用(目录级排除词不否决整个种子,可能还有别的版本)
             }
             int parsed = parseEpisode(fileName, season);
+            if (parsed > 0) {
+                sawIdentifiedEpisode = true;
+            }
             if (parsed == episode && !policy.hardRejected(file.size()) && !policy.overMax(file.size())) {
                 return true;
             }
+        }
+        // Metadata can be valid while filenames contain no usable episode marker. Keep it as a
+        // downgraded candidate; the shared policy already applied the 20GiB gate only when a
+        // target episode was identifiable.
+        if (sawVideo && !sawIdentifiedEpisode) {
+            return info.files().stream().filter(file -> file != null && isMediaFormat(file.path()))
+                    .anyMatch(file -> file.size() <= 0 || (!policy.hardRejected(file.size()) && !policy.overMax(file.size())));
         }
         return false;
     }
@@ -6430,6 +6481,9 @@ public class MediaSubscriptionCheckService {
         boolean preferredHit(long size) {
             return preferredBytes <= 0 || size >= preferredBytes;
         }
+    }
+
+    private record ScoredMagnet(Message message, MediaAcquirePolicy.Score score) {
     }
 
     /** 列举过程的体积过滤统计(空集真因分流):considered=通过格式/EXTRA 检查的候选文件,

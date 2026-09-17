@@ -295,6 +295,20 @@ class OfflineCleanupServiceTest {
     }
 
     @Test
+    void mediaOwnedPendingIsNotDeletedAsUnsubscribed() {
+        enable(true, 24, false);
+        OfflineDownloadTask task = task("PENDING", null, "电影");
+        task.setMediaKey("tmdb:movie:27205");
+        when(taskRepository.findCleanupCandidates(12)).thenReturn(List.of(task));
+
+        service.dailyCleanup();
+
+        verify(handler, never()).taskStatus(any(), any(), any());
+        verify(handler, never()).deleteTask(any(), any(), any(), anyBoolean());
+        assertEquals(null, task.getCleanupState());
+    }
+
+    @Test
     void pendingWithoutInfoHashFallsBackToStuckDaysOnly() {
         enable(true, 24, false);
         OfflineDownloadTask task = task("PENDING", 9, "ed2k 产物");
@@ -339,6 +353,20 @@ class OfflineCleanupServiceTest {
 
         service.dailyCleanup();
         verify(handler, never()).deleteTask(any(), any(), any(), anyBoolean());
+    }
+
+    @Test
+    void completedMediaOwnedTaskDoesNotUseGeneralTtl() {
+        enable(true, 24, false);
+        OfflineDownloadTask task = task("COMPLETED", null, "电影");
+        task.setMediaKey("tmdb:movie:27205");
+        task.setCompletedTime(Instant.now().minusSeconds(30 * 3600));
+        when(taskRepository.findCleanupCandidates(12)).thenReturn(List.of(task));
+
+        service.dailyCleanup();
+
+        verify(handler, never()).deleteTask(any(), any(), any(), anyBoolean());
+        assertEquals(null, task.getCleanupState());
     }
 
     // ---------- COMPLETED:msub 行 ----------

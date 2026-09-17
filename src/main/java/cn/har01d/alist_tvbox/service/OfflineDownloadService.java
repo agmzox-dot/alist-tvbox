@@ -13,6 +13,8 @@ import cn.har01d.alist_tvbox.entity.Setting;
 import cn.har01d.alist_tvbox.entity.SettingRepository;
 import cn.har01d.alist_tvbox.exception.BadRequestException;
 import cn.har01d.alist_tvbox.model.DownloadTarget;
+import cn.har01d.alist_tvbox.model.FsInfo;
+import cn.har01d.alist_tvbox.model.FsResponse;
 import cn.har01d.alist_tvbox.model.MagnetSubmitResult;
 import cn.har01d.alist_tvbox.model.StoredConfig;
 import cn.har01d.alist_tvbox.service.offline.OfflineDownloadHandler;
@@ -21,6 +23,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
@@ -51,6 +54,8 @@ public class OfflineDownloadService {
     private final OfflineDownloadTaskRepository offlineDownloadTaskRepository;
     private final ObjectMapper objectMapper;
     private final Map<DriverType, OfflineDownloadHandler> handlerMap;
+    private AListService aListService;
+    private SiteService siteService;
 
     public OfflineDownloadService(SettingRepository settingRepository,
                                   DriverAccountRepository driverAccountRepository,
@@ -62,6 +67,12 @@ public class OfflineDownloadService {
         this.offlineDownloadTaskRepository = offlineDownloadTaskRepository;
         this.objectMapper = objectMapper;
         this.handlerMap = handlers.stream().collect(Collectors.toMap(OfflineDownloadHandler::getDriverType, Function.identity()));
+    }
+
+    @Autowired
+    void setArtifactServices(AListService aListService, SiteService siteService) {
+        this.aListService = aListService;
+        this.siteService = siteService;
     }
 
     public OfflineDownloadConfigDto getConfig() {
@@ -215,6 +226,109 @@ public class OfflineDownloadService {
      */
     public MagnetSubmitResult submitMagnet(String url, Integer subscriptionId, Integer episode, int waitSeconds) {
         return doSubmitMagnet(url, subscriptionId, episode, waitSeconds, false, null);
+    }
+
+    /** Current-account scoped lookup for unified media-owned tasks. */
+    public Optional<OfflineDownloadTask> findMediaTask(String mediaKey, String status) {
+        StoredConfig config = loadEnabledConfig();
+        return offlineDownloadTaskRepository.findFirstByAccountIdAndMediaKeyAndStatusOrderByUpdatedTimeDesc(
+                config.accountId(), mediaKey, status);
+    }
+
+    /** Reconcile one timed-out media-owned task without submitting another remote task. */
+    public MediaTaskReconcile reconcileMediaTask(OfflineDownloadTask task) {
+        if (task == null || StringUtils.isBlank(task.getMediaKey())) {
+            return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
+        }
+        final StoredConfig config;
+        final DriverAccount account;
+        final OfflineDownloadHandler handler;
+        try {
+            config = loadEnabledConfig();
+            account = getAccount(config.accountId(), config.driverType());
+            handler = getHandler(config.driverType());
+        } catch (Exception e) {
+            log.debug("media task reconciliation unavailable: {}", e.getMessage());
+            return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
+        }
+
+        OfflineDownloadHandler.TaskStatus remoteStatus;
+        try {
+            remoteStatus = handler.taskStatus(account, task.getInfoHash(), task.getTaskName());
+        } catch (Exception e) {
+            log.debug("media task status reconciliation unavailable: {}", e.getMessage());
+            return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
+        }
+        if (remoteStatus == OfflineDownloadHandler.TaskStatus.FAILED) {
+            task.setStatus(STATUS_FAILED);
+            task.setUpdatedTime(Instant.now());
+            offlineDownloadTaskRepository.save(task);
+            return new MediaTaskReconcile(MediaTaskState.FAILED, task);
+        }
+        if (remoteStatus != OfflineDownloadHandler.TaskStatus.SUCCEEDED) {
+            return new MediaTaskReconcile(remoteStatus == OfflineDownloadHandler.TaskStatus.RUNNING
+                    ? MediaTaskState.RUNNING : MediaTaskState.ABSENT, task);
+        }
+
+        Optional<OfflineDownloadHandler.TaskResult> remoteResult;
+        try {
+            remoteResult = handler.completedTask(account, task.getInfoHash(), task.getTaskName());
+        } catch (Exception e) {
+            log.debug("media task completed result unavailable: {}", e.getMessage());
+            remoteResult = Optional.empty();
+        }
+        OfflineDownloadHandler.TaskResult result = remoteResult.orElseGet(() ->
+                StringUtils.isBlank(task.getTaskName()) ? null
+                        : new OfflineDownloadHandler.TaskResult(task.getTaskName(), task.getInfoHash(), task.isFolder()));
+        if (result == null || StringUtils.isBlank(result.taskName())) {
+            return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
+        }
+        Optional<Product> product = findOfflineProduct(account, result);
+        if (product.isEmpty()) {
+            // A successful remote phase can arrive before the AList directory is visible.
+            return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
+        }
+
+        Instant now = Instant.now();
+        task.setInfoHash(StringUtils.firstNonBlank(result.infoHash(), task.getInfoHash()));
+        task.setTaskName(product.get().name());
+        task.setTargetPath(buildTargetPath(account, product.get().name()));
+        task.setFolder(product.get().folder());
+        task.setStatus(STATUS_COMPLETED);
+        task.setCompletedTime(now);
+        task.setUpdatedTime(now);
+        offlineDownloadTaskRepository.save(task);
+        return new MediaTaskReconcile(MediaTaskState.COMPLETED, task);
+    }
+
+    private Optional<Product> findOfflineProduct(DriverAccount account, OfflineDownloadHandler.TaskResult result) {
+        if (aListService == null || siteService == null) {
+            return Optional.empty();
+        }
+        try {
+            FsResponse listing = aListService.listFiles(siteService.getById(1), buildRootPath(account), 1, 0, true);
+            if (listing == null || listing.getFiles() == null) {
+                return Optional.empty();
+            }
+            for (FsInfo file : listing.getFiles()) {
+                if (file != null && result.taskName().equals(file.getName())) {
+                    return Optional.of(new Product(file.getName(), file.getType() == 1 || result.folder()));
+                }
+            }
+        } catch (Exception e) {
+            log.debug("media task product listing unavailable: {}", e.getMessage());
+        }
+        return Optional.empty();
+    }
+
+    public enum MediaTaskState {
+        RUNNING, COMPLETED, FAILED, ABSENT, UNKNOWN
+    }
+
+    public record MediaTaskReconcile(MediaTaskState state, OfflineDownloadTask task) {
+    }
+
+    private record Product(String name, boolean folder) {
     }
 
     /** Unified media acquire entry point; keeps the existing OfflineDownloadTask state machine. */

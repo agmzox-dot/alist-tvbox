@@ -68,11 +68,11 @@ public class MediaAcquireService {
                         var result = offlineDownloadService.submitMagnet(scored.candidate.url(), null, null, 30, mediaKey);
                         if (cn.har01d.alist_tvbox.model.MagnetSubmitResult.COMPLETED.equals(result.status())) {
                             OfflineDownloadTask task = completedTask(mediaKey).orElse(null);
-                            return AcquireResult.completed(identity, scored.candidate, scored.score,
+                            return AcquireResult.completed(identity, scored.candidate, scored.score.value(),
                                     task, result.taskName());
                         }
                         if (cn.har01d.alist_tvbox.model.MagnetSubmitResult.SUBMITTED.equals(result.status())) {
-                            return AcquireResult.pending(identity, scored.candidate, scored.score,
+                            return AcquireResult.pending(identity, scored.candidate, scored.score.value(),
                                     "正在获取资源");
                         }
                         log.info("media acquire candidate rejected: provider={}, score={}, reasons={}",
@@ -108,14 +108,21 @@ public class MediaAcquireService {
     }
 
     private AcquireResult existing(String mediaKey, MediaIdentity identity) {
-        OfflineDownloadTask completed = taskRepository
-                .findFirstByMediaKeyAndStatusOrderByUpdatedTimeDesc(mediaKey, COMPLETED).orElse(null);
+        OfflineDownloadTask completed = offlineDownloadService.findMediaTask(mediaKey, COMPLETED).orElse(null);
         if (usable(completed)) {
             return AcquireResult.completed(identity, null, 0, completed, completed.getTaskName());
         }
-        OfflineDownloadTask pending = taskRepository
-                .findFirstByMediaKeyAndStatusOrderByUpdatedTimeDesc(mediaKey, PENDING).orElse(null);
+        OfflineDownloadTask pending = offlineDownloadService.findMediaTask(mediaKey, PENDING).orElse(null);
         if (pending != null && !OfflineDownloadService.CLEANUP_DONE.equals(pending.getCleanupState())) {
+            OfflineDownloadService.MediaTaskReconcile reconciled = offlineDownloadService.reconcileMediaTask(pending);
+            if (reconciled != null && OfflineDownloadService.MediaTaskState.COMPLETED.equals(reconciled.state())
+                    && usable(reconciled.task())) {
+                OfflineDownloadTask task = reconciled.task();
+                return AcquireResult.completed(identity, null, 0, task, task.getTaskName());
+            }
+            if (reconciled != null && OfflineDownloadService.MediaTaskState.FAILED.equals(reconciled.state())) {
+                return null; // The next sorted candidate may still be usable.
+            }
             return AcquireResult.pending(identity, null, 0, "正在获取资源");
         }
         return null;
@@ -168,7 +175,7 @@ public class MediaAcquireService {
     }
 
     private Optional<OfflineDownloadTask> completedTask(String mediaKey) {
-        return taskRepository.findFirstByMediaKeyAndStatusOrderByUpdatedTimeDesc(mediaKey, COMPLETED)
+        return offlineDownloadService.findMediaTask(mediaKey, COMPLETED)
                 .filter(this::usable);
     }
 

@@ -41,6 +41,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.eq;
 
 /**
  * 磁力兜底:门禁矩阵(转存模式/轮次/冷却/未配置)、离线产物收割(目录/单文件形态)、
@@ -341,6 +342,23 @@ class MediaSubscriptionMagnetFallbackTest {
         // SUBMITTED 冷却:下轮不重复提交(网盘侧任务已在,重复提交烧配额)
         service.magnetFallback(subscription(), Set.of(3), 6);
         verify(offlineDownloadService, times(1)).submitMagnet(anyString(), anyInt(), anyInt(), anyInt());
+    }
+
+    @Test
+    void stableTmdbSubscriptionUsesEpisodeMediaKey() {
+        MediaSubscription subscription = subscription();
+        subscription.setMetaProvider("tmdb");
+        subscription.setMetaId("1399");
+        Message magnet = matchedMagnet(3);
+        when(telegramService.searchMagnets(anyString(), anyInt())).thenReturn(List.of(magnet));
+        when(offlineDownloadService.submitMagnet(anyString(), eq(9), eq(3), anyInt(),
+                eq("tmdb:tv:1399:s1:e3"))).thenReturn(MagnetSubmitResult.submitted("已提交,等待网盘下载"));
+
+        service.magnetFallback(subscription, Set.of(3), 5);
+
+        verify(offlineDownloadService).submitMagnet(anyString(), eq(9), eq(3), anyInt(),
+                eq("tmdb:tv:1399:s1:e3"));
+        verify(offlineDownloadService, never()).submitMagnet(anyString(), eq(9), eq(3), anyInt());
     }
 
     @Test

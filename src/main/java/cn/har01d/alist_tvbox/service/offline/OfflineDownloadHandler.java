@@ -5,6 +5,7 @@ import cn.har01d.alist_tvbox.entity.DriverAccount;
 import org.apache.commons.lang3.StringUtils;
 
 import java.util.Locale;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -29,6 +30,11 @@ public interface OfflineDownloadHandler {
      */
     default TaskStatus taskStatus(DriverAccount account, String infoHash, String taskName) {
         return TaskStatus.ABSENT;
+    }
+
+    /** 已完成任务的名称/形态，用于超时后把 media-owned PENDING 行结算回播放路径。 */
+    default Optional<TaskResult> completedTask(DriverAccount account, String infoHash, String taskName) {
+        return Optional.empty();
     }
 
     /**

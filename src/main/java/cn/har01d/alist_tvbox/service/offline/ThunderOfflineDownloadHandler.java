@@ -23,6 +23,7 @@ import org.springframework.web.client.RestTemplate;
 
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.time.Duration;
@@ -104,6 +105,15 @@ public class ThunderOfflineDownloadHandler implements OfflineDownloadHandler {
             return TaskStatus.FAILED;
         }
         return TaskStatus.RUNNING;
+    }
+
+    @Override
+    public Optional<TaskResult> completedTask(DriverAccount account, String infoHash, String taskName) {
+        ObjectNode task = findTaskByIdentity(account, infoHash, taskName);
+        if (task == null || !"PHASE_TYPE_COMPLETE".equals(task.path("phase").asText(""))) {
+            return Optional.empty();
+        }
+        return Optional.of(buildTaskResult(task, infoHash));
     }
 
     /** 离线清理删除任务:定位任务(查无=幂等成功)后 DELETE task_ids(+delete_files 连文件);失败上抛由清理侧重试。 */
@@ -383,7 +393,7 @@ public class ThunderOfflineDownloadHandler implements OfflineDownloadHandler {
     }
 
     private ObjectNode exchangeWithRetry(DriverAccount account, String url, HttpMethod method, ObjectNode body) {
-        String token = account.getToken();
+        String token = normalizeToken(account.getToken());
         if (StringUtils.isBlank(token)) {
             throw new BadRequestException("迅雷云盘Token为空，请先配置账号Token");
         }
@@ -394,11 +404,12 @@ public class ThunderOfflineDownloadHandler implements OfflineDownloadHandler {
         } catch (HttpClientErrorException.Unauthorized e) {
             log.info("thunder authorization rejected, reloading account token once: accountId={}", account.getId());
             DriverAccount refreshed = driverAccountRepository.findById(account.getId()).orElse(null);
-            if (refreshed == null || StringUtils.isBlank(refreshed.getToken())) {
+            String refreshedToken = refreshed == null ? "" : normalizeToken(refreshed.getToken());
+            if (StringUtils.isBlank(refreshedToken) || token.equals(refreshedToken)) {
                 throw new BadRequestException("迅雷云盘认证已失效，请重新同步Token");
             }
             try {
-                return exchange(url, method, refreshed.getToken(), refreshed.getCookie(),
+                return exchange(url, method, refreshedToken, refreshed.getCookie(),
                         getDeviceId(refreshed), body);
             } catch (HttpClientErrorException.Unauthorized retry) {
                 throw new BadRequestException("迅雷云盘认证失败，请重新同步Token", retry);
@@ -414,6 +425,14 @@ public class ThunderOfflineDownloadHandler implements OfflineDownloadHandler {
             }
             throw new BadRequestException("迅雷云盘接口错误: " + respBody);
         }
+    }
+
+    private static String normalizeToken(String token) {
+        String value = StringUtils.trimToEmpty(token);
+        if (value.regionMatches(true, 0, "Bearer ", 0, "Bearer ".length())) {
+            return value.substring("Bearer ".length()).trim();
+        }
+        return value;
     }
 
     private ObjectNode exchange(String url, HttpMethod method, String token, String captchaToken, String deviceId, ObjectNode body) {

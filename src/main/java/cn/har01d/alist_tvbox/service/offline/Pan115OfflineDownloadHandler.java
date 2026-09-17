@@ -23,6 +23,7 @@ import org.springframework.web.client.RestTemplate;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.time.Duration;
@@ -178,6 +179,20 @@ public class Pan115OfflineDownloadHandler implements OfflineDownloadHandler {
             return TaskStatus.FAILED;
         }
         return TaskStatus.RUNNING;
+    }
+
+    @Override
+    public Optional<TaskResult> completedTask(DriverAccount account, String infoHash, String taskName) {
+        ObjectNode task = findTaskByIdentity(account, infoHash, taskName, 2);
+        if (task == null || task.path("status").asInt(-1) != 2) {
+            return Optional.empty();
+        }
+        String name = task.path("name").asText("");
+        if (StringUtils.isBlank(name)) {
+            return Optional.empty();
+        }
+        return Optional.of(new TaskResult(name, task.path("info_hash").asText(infoHash),
+                task.path("file_category").asInt(1) == 0));
     }
 
     /**

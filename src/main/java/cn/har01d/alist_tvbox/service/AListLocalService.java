@@ -476,10 +476,10 @@ public class AListLocalService {
             body.put("value", value);
             body.put("accountId", accountId);
             body.put("modified", OffsetDateTime.now().toString());
-            log.debug("updateTokenToAList: {}", body);
+            log.debug("updateTokenToAList: accountId={}, key={}", accountId, key);
             HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
             ResponseEntity<String> response = restTemplate.exchange("/api/admin/token/update", HttpMethod.POST, entity, String.class);
-            log.debug("updateTokenToAList {} response: {}", key, response.getBody());
+            log.debug("updateTokenToAList {} completed with status {}", key, response.getStatusCode());
         } else {
             String sql = "INSERT INTO x_tokens VALUES(?,?,?,?)";
             executeUpdate(sql, key, value, accountId, OffsetDateTime.now());
@@ -493,7 +493,7 @@ public class AListLocalService {
             headers.set(HttpHeaders.AUTHORIZATION, token);
             HttpEntity<String> entity = new HttpEntity<>(null, headers);
             ResponseEntity<AliTokensResponse> response = restTemplate.exchange("/api/admin/token/list", HttpMethod.GET, entity, AliTokensResponse.class);
-            log.trace("getTokens response: {}", response.getBody().getData());
+            log.trace("getTokens response received");
             return response.getBody();
         } catch (Exception e) {
             log.warn("", e);

@@ -142,13 +142,25 @@ public class OfflineCleanupService {
                     return deleteRemote(task, account, handler, managed, true);
                 }
             }
-            case STATUS_PENDING -> processPending(task, account, handler, managed, config);
-            case STATUS_COMPLETED -> processCompleted(task, account, handler, managed, config);
+            case STATUS_PENDING -> {
+                if (!mediaOwned(task)) {
+                    processPending(task, account, handler, managed, config);
+                }
+            }
+            case STATUS_COMPLETED -> {
+                if (!mediaOwned(task)) {
+                    processCompleted(task, account, handler, managed, config);
+                }
+            }
             default -> {
                 // 未知状态不动
             }
         }
         return false;
+    }
+
+    private boolean mediaOwned(OfflineDownloadTask task) {
+        return StringUtils.isNotBlank(task.getMediaKey());
     }
 
     /**

@@ -10,6 +10,9 @@ public interface OfflineDownloadTaskRepository extends JpaRepository<OfflineDown
 
     Optional<OfflineDownloadTask> findFirstByMediaKeyAndStatusOrderByUpdatedTimeDesc(String mediaKey, String status);
 
+    Optional<OfflineDownloadTask> findFirstByAccountIdAndMediaKeyAndStatusOrderByUpdatedTimeDesc(
+            Integer accountId, String mediaKey, String status);
+
     /** 收割结算用:该订阅该集最新一条超时 PENDING(按集回写产物名/路径,恢复 pending 闸门语义)。 */
     Optional<OfflineDownloadTask> findFirstBySubscriptionIdAndEpisodeAndStatusOrderByUpdatedTimeDesc(
             Integer subscriptionId, Integer episode, String status);

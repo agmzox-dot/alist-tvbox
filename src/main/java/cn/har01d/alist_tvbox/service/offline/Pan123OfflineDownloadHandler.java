@@ -23,6 +23,7 @@ import org.springframework.web.client.RestTemplate;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -219,6 +220,19 @@ public class Pan123OfflineDownloadHandler implements OfflineDownloadHandler {
             return TaskStatus.ABSENT;
         }
         return mapTaskStatus(task.path("status").asInt(-1));
+    }
+
+    @Override
+    public Optional<TaskResult> completedTask(DriverAccount account, String infoHash, String taskName) {
+        ObjectNode task = findTask(account, infoHash, taskName);
+        if (task == null || task.path("status").asInt(-1) != 2) {
+            return Optional.empty();
+        }
+        String name = StringUtils.firstNonBlank(task.path("upload_name").asText(""), task.path("name").asText(""));
+        if (StringUtils.isBlank(name)) {
+            return Optional.empty();
+        }
+        return Optional.of(new TaskResult(name, task.path("task_id").asText(infoHash), false));
     }
 
     static TaskStatus mapTaskStatus(int status) {

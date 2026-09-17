@@ -5,8 +5,10 @@ import org.apache.commons.lang3.StringUtils;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Shared pre-submit gate and deterministic quality ranking. */
@@ -17,12 +19,14 @@ public class MediaAcquirePolicy {
     private static final long PREFERRED_MAX_BYTES = 18 * GIB;
     private static final long VERY_SMALL_4K_BYTES = 2 * GIB;
     private static final Pattern VIDEO = Pattern.compile("(?i)\\.(mp4|mkv|m4v|avi|ts|m2ts|webm|mov|wmv|flv)$");
-    private static final Pattern EPISODE = Pattern.compile("(?i)(?:s\\d{1,2}e|e|ep|第)\\s*0*(\\d{1,4})");
+    private static final Pattern SEASON_EPISODE = Pattern.compile("(?i)s\\s*0*(\\d{1,2})\\s*e\\s*0*(\\d{1,4})");
+    private static final Pattern EPISODE = Pattern.compile("(?i)(?:e|ep|第)\\s*0*(\\d{1,4})");
+    private static final Pattern SEASON = Pattern.compile("(?i)(?:s|season)\\s*0*(\\d{1,2})(?!\\d)");
 
     public Score score(MediaIdentity identity, String expectedTitle, MediaAcquireCandidate candidate) {
         return identity.isMovie()
                 ? scoreMovie(expectedTitle, candidate)
-                : scoreTv(expectedTitle, null, candidate);
+                : scoreTv(expectedTitle, null, null, candidate);
     }
 
     public Score scoreMovie(String expectedTitle, MediaAcquireCandidate candidate) {
@@ -51,6 +55,11 @@ public class MediaAcquirePolicy {
     }
 
     public Score scoreTv(String expectedTitle, Integer targetEpisode, MediaAcquireCandidate candidate) {
+        return scoreTv(expectedTitle, null, targetEpisode, candidate);
+    }
+
+    public Score scoreTv(String expectedTitle, Integer targetSeason, Integer targetEpisode,
+                         MediaAcquireCandidate candidate) {
         List<String> reasons = new ArrayList<>();
         if (!titleMatches(expectedTitle, candidate)) {
             return reject("媒体标题明显不匹配", reasons);
@@ -59,13 +68,38 @@ public class MediaAcquirePolicy {
         if (candidate.metadataResolved() && videos.isEmpty()) {
             return reject("没有视频文件", reasons);
         }
+        Set<Integer> identifiedSeasons = new HashSet<>();
+        Set<Integer> identifiedEpisodes = new HashSet<>();
         MagnetResolver.MagnetFile target = null;
-        if (targetEpisode != null && !videos.isEmpty()) {
-            target = videos.stream()
-                    .filter(file -> episodeOf(file.path()) == targetEpisode)
-                    .max(Comparator.comparingLong(MagnetResolver.MagnetFile::size)).orElse(null);
-            if (target == null) {
-                reasons.add("目标单集未在文件清单中验证");
+        if (candidate.metadataResolved()) {
+            for (MagnetResolver.MagnetFile file : videos) {
+                identifiedSeasons.addAll(seasonsOf(file.path()));
+                EpisodeReference reference = episodeOf(file.path());
+                if (reference == null) {
+                    continue;
+                }
+                identifiedEpisodes.add(reference.episode());
+                if (reference.season() != null) {
+                    identifiedSeasons.add(reference.season());
+                }
+            }
+            if (identifiedSeasons.isEmpty()) {
+                identifiedSeasons.addAll(seasonsOf(candidate.torrentName()));
+            }
+            if (targetSeason != null && !identifiedSeasons.isEmpty()
+                    && !identifiedSeasons.contains(targetSeason)) {
+                return reject("明显错误季", reasons);
+            }
+            if (targetEpisode != null && !videos.isEmpty()) {
+                target = videos.stream()
+                        .filter(file -> matchesEpisode(file.path(), targetSeason, targetEpisode))
+                        .max(Comparator.comparingLong(MagnetResolver.MagnetFile::size)).orElse(null);
+                if (target == null && !identifiedEpisodes.isEmpty()) {
+                    return reject("目标单集未在文件清单中验证", reasons);
+                }
+                if (target == null) {
+                    reasons.add("文件清单无法识别集号，降权");
+                }
             }
         }
         MagnetResolver.MagnetFile main = target != null ? target
@@ -78,6 +112,8 @@ public class MediaAcquirePolicy {
         int score = qualityScore(candidateText(candidate), reasons) + codecScore(candidateText(candidate), reasons);
         if (!candidate.metadataResolved()) {
             score -= 100;
+        } else if (targetEpisode != null && target == null && identifiedEpisodes.isEmpty()) {
+            score -= 75;
         }
         return accept(score, reasons, main == null ? 0 : main.size());
     }
@@ -184,16 +220,42 @@ public class MediaAcquirePolicy {
         return value.toString();
     }
 
-    private static Integer episodeOf(String path) {
+    private static boolean matchesEpisode(String path, Integer targetSeason, Integer targetEpisode) {
+        EpisodeReference reference = episodeOf(path);
+        return reference != null && reference.episode() == targetEpisode
+                && (targetSeason == null || reference.season() == null || reference.season() == targetSeason);
+    }
+
+    private static EpisodeReference episodeOf(String path) {
         if (StringUtils.isBlank(path)) {
             return null;
         }
-        var matcher = EPISODE.matcher(path);
-        Integer result = null;
-        while (matcher.find()) {
-            result = Integer.valueOf(matcher.group(1));
+        var seasonEpisode = SEASON_EPISODE.matcher(path);
+        EpisodeReference result = null;
+        while (seasonEpisode.find()) {
+            result = new EpisodeReference(Integer.valueOf(seasonEpisode.group(1)),
+                    Integer.valueOf(seasonEpisode.group(2)));
+        }
+        if (result != null) {
+            return result;
+        }
+        var episode = EPISODE.matcher(path);
+        while (episode.find()) {
+            result = new EpisodeReference(null, Integer.valueOf(episode.group(1)));
         }
         return result;
+    }
+
+    private static Set<Integer> seasonsOf(String text) {
+        Set<Integer> result = new HashSet<>();
+        var matcher = SEASON.matcher(StringUtils.defaultString(text));
+        while (matcher.find()) {
+            result.add(Integer.valueOf(matcher.group(1)));
+        }
+        return result;
+    }
+
+    private record EpisodeReference(Integer season, int episode) {
     }
 
     private static boolean contains(String value, String... terms) {

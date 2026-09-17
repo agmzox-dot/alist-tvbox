@@ -194,6 +194,25 @@ class ThunderOfflineDownloadHandlerTest {
     }
 
     @Test
+    void unauthorizedWithUnchangedStoredTokenFailsWithoutSecondHttpCall() {
+        account.setToken("same-token");
+        DriverAccount refreshed = new DriverAccount();
+        refreshed.setId(account.getId());
+        refreshed.setToken("same-token");
+        when(driverAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(refreshed));
+        when(restTemplate.exchange(eq(LIST_URL), eq(HttpMethod.GET), any(HttpEntity.class), eq(String.class)))
+                .thenThrow(unauthorized());
+
+        cn.har01d.alist_tvbox.exception.BadRequestException exception =
+                org.junit.jupiter.api.Assertions.assertThrows(cn.har01d.alist_tvbox.exception.BadRequestException.class,
+                        () -> handler.taskStatus(account, HEX, null));
+
+        assertEquals("迅雷云盘认证已失效，请重新同步Token", exception.getMessage());
+        assertFalse(exception.getMessage().contains("same-token"));
+        verify(restTemplate).exchange(eq(LIST_URL), eq(HttpMethod.GET), any(HttpEntity.class), eq(String.class));
+    }
+
+    @Test
     void repeatedUnauthorizedFailsAfterSingleReplay() {
         DriverAccount refreshed = new DriverAccount();
         refreshed.setId(account.getId());
