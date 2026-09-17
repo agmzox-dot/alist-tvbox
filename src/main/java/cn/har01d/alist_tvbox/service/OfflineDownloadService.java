@@ -136,7 +136,7 @@ public class OfflineDownloadService {
 
         OfflineDownloadHandler.TaskResult result = handler.submitAndWait(account, request.url(), pathId);
         String targetPath = buildTargetPath(account, result.taskName());
-        saveTask(account.getId(), urlHash, result, targetPath, null, null);
+        saveTask(account.getId(), urlHash, result, targetPath, null, null, null);
         log.info("offline download task completed: driverType={}, accountId={}, urlHash={}, targetPath={}", config.driverType(), account.getId(), urlHash, targetPath);
         return new DownloadTarget(targetPath, result.folder());
     }
@@ -214,16 +214,22 @@ public class OfflineDownloadService {
      * FAILED 也落行(带订阅/集号):试错同样消耗配额与网盘侧风控信任,且同磁力不再重试。
      */
     public MagnetSubmitResult submitMagnet(String url, Integer subscriptionId, Integer episode, int waitSeconds) {
-        return doSubmitMagnet(url, subscriptionId, episode, waitSeconds, false);
+        return doSubmitMagnet(url, subscriptionId, episode, waitSeconds, false, null);
+    }
+
+    /** Unified media acquire entry point; keeps the existing OfflineDownloadTask state machine. */
+    public MagnetSubmitResult submitMagnet(String url, Integer subscriptionId, Integer episode, int waitSeconds,
+                                           String mediaKey) {
+        return doSubmitMagnet(url, subscriptionId, episode, waitSeconds, false, mediaKey);
     }
 
     /** 手动补缺路径(用户明确动作):FAILED 记忆不拦重试 —— 重贴失败磁力=重新提交,行按 urlHash 原地更新。 */
     public MagnetSubmitResult submitMagnetRetryFailed(String url, Integer subscriptionId, Integer episode, int waitSeconds) {
-        return doSubmitMagnet(url, subscriptionId, episode, waitSeconds, true);
+        return doSubmitMagnet(url, subscriptionId, episode, waitSeconds, true, null);
     }
 
     private MagnetSubmitResult doSubmitMagnet(String url, Integer subscriptionId, Integer episode, int waitSeconds,
-                                              boolean retryFailed) {
+                                              boolean retryFailed, String mediaKey) {
         validateUrl(url);
         StoredConfig config = loadEnabledConfig();
         DriverAccount account = getAccount(config.accountId(), config.driverType());
@@ -236,9 +242,11 @@ public class OfflineDownloadService {
             // —— 115 删任务正是为了解除「不能重复添加」,app 侧短路必须同步放行。
             boolean cleaned = CLEANUP_DONE.equals(task.getCleanupState());
             if (!cleaned && STATUS_COMPLETED.equals(task.getStatus()) && StringUtils.isNotBlank(task.getTargetPath())) {
+                associateMediaKey(task, mediaKey);
                 return MagnetSubmitResult.completed(task.getTaskName());
             }
             if (!cleaned && STATUS_PENDING.equals(task.getStatus())) {
+                associateMediaKey(task, mediaKey);
                 return MagnetSubmitResult.submitted("任务进行中,等待网盘下载");
             }
             if (STATUS_FAILED.equals(task.getStatus()) && !retryFailed) {
@@ -259,21 +267,28 @@ public class OfflineDownloadService {
                 String pendingTaskId = e instanceof cn.har01d.alist_tvbox.service.offline.OfflineTaskPendingException pending
                         && StringUtils.isNotBlank(pending.getTaskId()) ? pending.getTaskId() : null;
                 saveAttempt(account.getId(), urlHash, url, pendingTaskId, subscriptionId, episode,
-                        STATUS_PENDING, predictProductName(url), null, false);
+                        STATUS_PENDING, predictProductName(url), null, false, mediaKey);
                 return MagnetSubmitResult.submitted("已提交,等待网盘下载");
             }
-            saveAttempt(account.getId(), urlHash, url, null, subscriptionId, episode, STATUS_FAILED, null, null, false);
+            saveAttempt(account.getId(), urlHash, url, null, subscriptionId, episode, STATUS_FAILED, null, null, false, mediaKey);
             deleteFailedTaskQuietly(config, account, url, urlHash);
             return MagnetSubmitResult.failed(e.getMessage());
         } catch (Exception e) {
-            saveAttempt(account.getId(), urlHash, url, null, subscriptionId, episode, STATUS_FAILED, null, null, false);
+            saveAttempt(account.getId(), urlHash, url, null, subscriptionId, episode, STATUS_FAILED, null, null, false, mediaKey);
             deleteFailedTaskQuietly(config, account, url, urlHash);
             return MagnetSubmitResult.failed(StringUtils.defaultIfBlank(e.getMessage(), "离线下载提交失败"));
         }
         String targetPath = buildTargetPath(account, result.taskName());
-        saveTask(account.getId(), urlHash, result, targetPath, subscriptionId, episode);
+        saveTask(account.getId(), urlHash, result, targetPath, subscriptionId, episode, mediaKey);
         log.info("magnet offline download completed: urlHash={}, taskName={}", urlHash, result.taskName());
         return MagnetSubmitResult.completed(result.taskName());
+    }
+
+    private void associateMediaKey(OfflineDownloadTask task, String mediaKey) {
+        if (StringUtils.isNotBlank(mediaKey) && StringUtils.isBlank(task.getMediaKey())) {
+            task.setMediaKey(mediaKey);
+            offlineDownloadTaskRepository.save(task);
+        }
     }
 
     public void syncConfiguredTempDirOnStartup() {
@@ -514,7 +529,7 @@ public class OfflineDownloadService {
     }
 
     private void saveTask(Integer accountId, String urlHash, OfflineDownloadHandler.TaskResult result, String targetPath,
-                          Integer subscriptionId, Integer episode) {
+                          Integer subscriptionId, Integer episode, String mediaKey) {
         OfflineDownloadTask entity = offlineDownloadTaskRepository
                 .findFirstByAccountIdAndUrlHashOrderByUpdatedTimeDesc(accountId, urlHash)
                 .orElseGet(OfflineDownloadTask::new);
@@ -524,6 +539,7 @@ public class OfflineDownloadService {
         }
         entity.setAccountId(accountId);
         entity.setUrlHash(urlHash);
+        entity.setMediaKey(mediaKey);
         entity.setInfoHash(StringUtils.firstNonBlank(result.infoHash(), entity.getInfoHash()));
         entity.setTargetPath(targetPath);
         entity.setTaskName(result.taskName());
@@ -542,7 +558,8 @@ public class OfflineDownloadService {
      *  超时 PENDING 行落 info_hash(优先网盘侧任务 id——123 等盘超时时已拿到;否则 magnet btih):
      *  离线清理活体检查按它对账网盘任务列表。infoHash 参数为 null 时从链接提取 btih。 */
     private void saveAttempt(Integer accountId, String urlHash, String url, String infoHash, Integer subscriptionId,
-                             Integer episode, String status, String taskName, String targetPath, boolean folder) {
+                             Integer episode, String status, String taskName, String targetPath, boolean folder,
+                             String mediaKey) {
         OfflineDownloadTask entity = offlineDownloadTaskRepository
                 .findFirstByAccountIdAndUrlHashOrderByUpdatedTimeDesc(accountId, urlHash)
                 .orElseGet(OfflineDownloadTask::new);
@@ -552,6 +569,7 @@ public class OfflineDownloadService {
         }
         entity.setAccountId(accountId);
         entity.setUrlHash(urlHash);
+        entity.setMediaKey(mediaKey);
         entity.setInfoHash(StringUtils.firstNonBlank(infoHash, OfflineDownloadHandler.extractInfoHash(url), entity.getInfoHash()));
         entity.setTaskName(taskName);
         entity.setTargetPath(targetPath);

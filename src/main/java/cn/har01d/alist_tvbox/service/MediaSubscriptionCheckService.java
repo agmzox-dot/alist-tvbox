@@ -4102,7 +4102,15 @@ public class MediaSubscriptionCheckService {
         MediaSubscription subscription = ownedSubscription(uid, id);
         String base = StringUtils.defaultIfBlank(StringUtils.trimToNull(keyword), seasonKeyword(subscription));
         String query = episode != null ? base + " " + episode : base;
-        int size = appProperties.getSubscription().getSearchSize();
+        return searchOfflineCandidates(query, appProperties.getSubscription().getSearchSize());
+    }
+
+    /** Existing configured offline search, exposed for the generic media acquire layer. */
+    public List<Map<String, Object>> searchMediaAcquireCandidates(String keyword) {
+        return searchOfflineCandidates(StringUtils.trimToEmpty(keyword), appProperties.getSubscription().getSearchSize());
+    }
+
+    private List<Map<String, Object>> searchOfflineCandidates(String query, int size) {
         CompletableFuture<List<cn.har01d.alist_tvbox.dto.tg.Message>> telegram = telegramService != null
                 ? searchAsync("telegram", query, () -> telegramService.searchMagnets(query, size), false) : null;
         CompletableFuture<List<cn.har01d.alist_tvbox.dto.tg.Message>> xb6v = xb6vSearchService != null

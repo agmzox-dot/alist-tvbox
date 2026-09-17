@@ -175,6 +175,16 @@ class PlayControllerTest {
     }
 
     @Test
+    void playShouldRejectMovieSubscribeEntry() throws Exception {
+        when(mediaSubscriptionService.resolveUid("test-token")).thenReturn(7);
+
+        mockMvc.perform(get("/play/test-token").param("id", "msubadd-tmdb:movie:42|测试电影"))
+                .andExpect(status().isBadRequest());
+        org.mockito.Mockito.verify(mediaSubscriptionService, org.mockito.Mockito.never()).create(eq(7), any());
+        org.mockito.Mockito.verifyNoInteractions(checkService);
+    }
+
+    @Test
     void playShouldRejectUnknownPianDanEntry() throws Exception {
         when(mediaSubscriptionService.resolveUid("test-token")).thenReturn(7);
         mockMvc.perform(get("/play/test-token").param("id", "msubadd-xxx:1"))

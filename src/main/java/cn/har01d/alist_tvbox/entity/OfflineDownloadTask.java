@@ -28,6 +28,9 @@ public class OfflineDownloadTask {
     private Integer accountId;
     @Column(nullable = false, length = 64)
     private String urlHash;
+    /** Stable media identity for unified acquire de-duplication, e.g. tmdb:movie:27205. */
+    @Column(name = "media_key", length = 128)
+    private String mediaKey;
     private String infoHash;
     @Column(columnDefinition = "TEXT")
     private String targetPath;

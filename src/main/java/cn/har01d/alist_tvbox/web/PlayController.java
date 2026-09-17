@@ -9,6 +9,7 @@ import cn.har01d.alist_tvbox.service.PianDanSubscriptionService;
 import cn.har01d.alist_tvbox.service.ProxyService;
 import cn.har01d.alist_tvbox.service.SubscriptionService;
 import cn.har01d.alist_tvbox.service.TvBoxService;
+import cn.har01d.alist_tvbox.service.acquire.MediaAcquireService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
@@ -94,6 +95,12 @@ public class PlayController {
 
         if (StringUtils.isNotBlank(bvid)) {
             return biliBiliService.getPlayUrl(bvid, dash, client);
+        }
+
+        if (StringUtils.isNotBlank(id) && id.startsWith(MediaAcquireService.ACQUIRE_PLAY_PREFIX)) {
+            int uid = mediaSubscriptionService.resolveUid(token);
+            return pianDanSubscriptionService.acquireMovie(uid,
+                    id.substring(MediaAcquireService.ACQUIRE_PLAY_PREFIX.length()), "");
         }
 
         if (StringUtils.isNotBlank(id) && id.startsWith("msubadd-")) {

@@ -312,7 +312,7 @@ class OfflineDownloadServiceTest {
                 .thenReturn(Optional.of(completedTask("/pan115/alist-tvbox-offline/完成任务", "完成任务")));
 
         cn.har01d.alist_tvbox.model.MagnetSubmitResult result =
-                service.submitMagnet("magnet:?xt=urn:btih:abc", null, null, 30);
+                service.submitMagnet("magnet:?xt=urn:btih:abc", null, null, 30, "tmdb:movie:27205");
 
         assertEquals(cn.har01d.alist_tvbox.model.MagnetSubmitResult.COMPLETED, result.status());
         assertEquals("完成任务", result.taskName());
@@ -336,6 +336,7 @@ class OfflineDownloadServiceTest {
         var captor = org.mockito.ArgumentCaptor.forClass(OfflineDownloadTask.class);
         verify(offlineDownloadTaskRepository).save(captor.capture());
         assertEquals("PENDING", captor.getValue().getStatus());
+        assertEquals("tmdb:movie:27205", captor.getValue().getMediaKey());
     }
 
     @Test

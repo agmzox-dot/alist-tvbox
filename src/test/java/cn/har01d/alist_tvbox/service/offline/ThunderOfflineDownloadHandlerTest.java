@@ -12,11 +12,15 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.boot.restclient.RestTemplateBuilder;
 import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import java.time.Duration;
+import java.nio.charset.StandardCharsets;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -133,6 +137,11 @@ class ThunderOfflineDownloadHandlerTest {
         return (ObjectNode) objectMapper.readTree(json);
     }
 
+    private HttpClientErrorException unauthorized() {
+        return HttpClientErrorException.create(HttpStatus.UNAUTHORIZED, "Unauthorized", HttpHeaders.EMPTY,
+                new byte[0], StandardCharsets.UTF_8);
+    }
+
     // ---------- 离线清理契约:活体检查(phase 映射)与删除(task_ids + delete_files) ----------
 
     private void stubTaskList(String tasksJson) {
@@ -166,6 +175,37 @@ class ThunderOfflineDownloadHandlerTest {
         stubTaskList("{\"id\":\"t1\",\"params\":{\"url\":\"ed2k://|file|产物.mkv|1|hash|/\"},\"phase\":\"PHASE_TYPE_COMPLETE\",\"file_name\":\"产物.mkv\"}");
 
         assertEquals(OfflineDownloadHandler.TaskStatus.SUCCEEDED, handler.taskStatus(account, null, "产物.mkv"));
+    }
+
+    @Test
+    void unauthorizedReloadsStoredTokenAndReplaysOnce() {
+        DriverAccount refreshed = new DriverAccount();
+        refreshed.setId(account.getId());
+        refreshed.setToken("fresh-token");
+        when(driverAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(refreshed));
+        when(restTemplate.exchange(eq(LIST_URL), eq(HttpMethod.GET), any(HttpEntity.class), eq(String.class)))
+                .thenThrow(unauthorized())
+                .thenReturn(ResponseEntity.ok("{\"tasks\":[]}"));
+
+        assertEquals(OfflineDownloadHandler.TaskStatus.ABSENT, handler.taskStatus(account, HEX, null));
+        verify(restTemplate, org.mockito.Mockito.times(2)).exchange(
+                eq(LIST_URL), eq(HttpMethod.GET), any(HttpEntity.class), eq(String.class));
+        verify(driverAccountRepository).findById(account.getId());
+    }
+
+    @Test
+    void repeatedUnauthorizedFailsAfterSingleReplay() {
+        DriverAccount refreshed = new DriverAccount();
+        refreshed.setId(account.getId());
+        refreshed.setToken("fresh-token");
+        when(driverAccountRepository.findById(account.getId())).thenReturn(java.util.Optional.of(refreshed));
+        when(restTemplate.exchange(eq(LIST_URL), eq(HttpMethod.GET), any(HttpEntity.class), eq(String.class)))
+                .thenThrow(unauthorized());
+
+        org.junit.jupiter.api.Assertions.assertThrows(cn.har01d.alist_tvbox.exception.BadRequestException.class,
+                () -> handler.taskStatus(account, HEX, null));
+        verify(restTemplate, org.mockito.Mockito.times(2)).exchange(
+                eq(LIST_URL), eq(HttpMethod.GET), any(HttpEntity.class), eq(String.class));
     }
 
     @Test

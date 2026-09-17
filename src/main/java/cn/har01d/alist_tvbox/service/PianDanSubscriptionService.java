@@ -3,9 +3,12 @@ package cn.har01d.alist_tvbox.service;
 import cn.har01d.alist_tvbox.dto.MediaSubscriptionRequest;
 import cn.har01d.alist_tvbox.dto.MetadataSearchItem;
 import cn.har01d.alist_tvbox.exception.BadRequestException;
+import cn.har01d.alist_tvbox.service.acquire.MediaAcquireService;
+import cn.har01d.alist_tvbox.service.acquire.MediaIdentity;
 import cn.har01d.alist_tvbox.tvbox.MovieDetail;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.util.HashSet;
@@ -26,13 +29,23 @@ public class PianDanSubscriptionService {
     private final MediaSubscriptionService mediaSubscriptionService;
     private final MediaSubscriptionCheckService checkService;
     private final PianDanService pianDanService;
+    private final MediaAcquireService mediaAcquireService;
 
+    @Autowired
     public PianDanSubscriptionService(MediaSubscriptionService mediaSubscriptionService,
                                        MediaSubscriptionCheckService checkService,
-                                       PianDanService pianDanService) {
+                                       PianDanService pianDanService,
+                                       MediaAcquireService mediaAcquireService) {
         this.mediaSubscriptionService = mediaSubscriptionService;
         this.checkService = checkService;
         this.pianDanService = pianDanService;
+        this.mediaAcquireService = mediaAcquireService;
+    }
+
+    public PianDanSubscriptionService(MediaSubscriptionService mediaSubscriptionService,
+                                      MediaSubscriptionCheckService checkService,
+                                      PianDanService pianDanService) {
+        this(mediaSubscriptionService, checkService, pianDanService, null);
     }
 
     /** 片单条目载荷 {vodId}|{剧名}|{季?} 的解析结果(年份取自 s: vodId 的 @{年} 后缀,豆瓣id 取自 db: vodId)。 */
@@ -50,8 +63,17 @@ public class PianDanSubscriptionService {
         String name = entry.name();
         MediaSubscriptionRequest request = new MediaSubscriptionRequest();
         if (entry.vodId().startsWith("tmdb:")) {
+            MediaIdentity identity;
+            try {
+                identity = MediaIdentity.parse(entry.vodId());
+            } catch (IllegalArgumentException e) {
+                throw new BadRequestException("无效的片单条目: " + entry.vodId(), e);
+            }
+            if (!identity.isTv()) {
+                throw new BadRequestException("电影不支持追剧，请使用获取/播放");
+            }
             request.setMetaProvider("tmdb");
-            request.setMetaId(entry.vodId().split(":")[2]);
+            request.setMetaId(identity.id());
         } else {
             bindDoubanMeta(request, entry);
         }
@@ -69,6 +91,24 @@ public class PianDanSubscriptionService {
         return new Result(dto, existed, name, entry.season(),
                 (entry.season() != null ? "第" + entry.season() + "季" : "")
                         + (existed ? "《" + name + "》已在追剧中" : "已加入追剧《" + name + "》,稍后在我的追剧查看"));
+    }
+
+    /** TMDB 电影一次性获取;不创建 MediaSubscription,复用统一离线任务与播放链。 */
+    public Object acquireMovie(int uid, String payload, String ac) {
+        PianDanEntry entry = pianDanEntry(payload);
+        MediaIdentity identity;
+        try {
+            identity = MediaIdentity.parse(entry.vodId());
+        } catch (IllegalArgumentException e) {
+            throw new BadRequestException("无效的片单条目: " + entry.vodId(), e);
+        }
+        if (!identity.isMovie()) {
+            throw new BadRequestException("只有电影支持一次性获取");
+        }
+        if (mediaAcquireService == null) {
+            throw new BadRequestException("媒体获取服务未启用");
+        }
+        return mediaAcquireService.acquireMovieResponse(uid, identity, entry.name(), ac);
     }
 
     /** 片单条目取消追剧:按标题语义匹配撤销;载荷带季号只撤该季(多季条目「取消·第N季」),不带则
@@ -182,17 +222,13 @@ public class PianDanSubscriptionService {
 
     /** TMDB vodId(tmdb:tv:42 / tmdb:movie:42)→ 详情;格式非法 400。 */
     private MovieDetail tmdbMeta(String vodId) {
-        String[] parts = vodId.split(":");
-        if (parts.length < 3) {
+        MediaIdentity identity;
+        try {
+            identity = MediaIdentity.parse(vodId);
+        } catch (IllegalArgumentException e) {
             throw new BadRequestException("无效的片单条目: " + vodId);
         }
-        int tmdbId;
-        try {
-            tmdbId = Integer.parseInt(parts[2]);
-        } catch (NumberFormatException e) {
-            throw new BadRequestException("无效的片单条目: " + vodId, e);
-        }
-        MovieDetail meta = pianDanService.tmdbDetail(parts[1], tmdbId);
+        MovieDetail meta = pianDanService.tmdbDetail(identity.mediaType(), Integer.parseInt(identity.id()));
         if (meta == null || StringUtils.isBlank(meta.getVod_name())) {
             throw new BadRequestException("片单条目信息获取失败: " + vodId);
         }

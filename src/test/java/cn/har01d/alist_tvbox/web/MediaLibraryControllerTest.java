@@ -143,6 +143,22 @@ class MediaLibraryControllerTest {
     }
 
     @Test
+    void pianDanMovieDetailCarriesAcquirePlayItemInsteadOfSubscribe() throws Exception {
+        MovieDetail meta = new MovieDetail();
+        meta.setVod_id("tmdb:movie:42");
+        meta.setVod_name("测试电影");
+        when(pianDanService.tmdbDetail("movie", 42)).thenReturn(meta);
+        when(mediaSubscriptionService.absoluteClientCover(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        mockMvc.perform(get("/media/token-a").param("id", "tmdb:movie:42"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.list[0].vod_play_url")
+                        .value("📄 媒体信息$msubinfo-" + encode("tmdb:movie:42|测试电影")
+                                + "#🔍 全局搜索$msubsearch-" + encode("测试电影")
+                                + "#⬇ 获取/播放$macquire-" + encode("tmdb:movie:42|测试电影")));
+    }
+
+    @Test
     void pianDanTmdbMultiSeasonDetailExpandsPerSeason() throws Exception {
         MovieDetail meta = new MovieDetail();
         meta.setVod_id("tmdb:tv:42");

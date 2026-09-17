@@ -391,6 +391,18 @@ public class ThunderOfflineDownloadHandler implements OfflineDownloadHandler {
         String deviceId = getDeviceId(account);
         try {
             return exchange(url, method, token, captchaToken, deviceId, body);
+        } catch (HttpClientErrorException.Unauthorized e) {
+            log.info("thunder authorization rejected, reloading account token once: accountId={}", account.getId());
+            DriverAccount refreshed = driverAccountRepository.findById(account.getId()).orElse(null);
+            if (refreshed == null || StringUtils.isBlank(refreshed.getToken())) {
+                throw new BadRequestException("迅雷云盘认证已失效，请重新同步Token");
+            }
+            try {
+                return exchange(url, method, refreshed.getToken(), refreshed.getCookie(),
+                        getDeviceId(refreshed), body);
+            } catch (HttpClientErrorException.Unauthorized retry) {
+                throw new BadRequestException("迅雷云盘认证失败，请重新同步Token", retry);
+            }
         } catch (HttpClientErrorException.BadRequest e) {
             String respBody = e.getResponseBodyAsString();
             if (respBody.contains("captcha_invalid")) {
@@ -417,7 +429,6 @@ public class ThunderOfflineDownloadHandler implements OfflineDownloadHandler {
         headers.set("X-Space-Authorization", "");
 
         HttpEntity<?> entity = body != null ? new HttpEntity<>(body.toString(), headers) : new HttpEntity<>(headers);
-        log.debug("exchange: {}", entity);
         ResponseEntity<String> response = restTemplate.exchange(url, method, entity, String.class);
         return parseJsonBody(response.getBody(), url);
     }

@@ -1,9 +1,12 @@
 package cn.har01d.alist_tvbox.web;
 
 import cn.har01d.alist_tvbox.exception.BadRequestException;
+import cn.har01d.alist_tvbox.entity.MediaSubscription;
 import cn.har01d.alist_tvbox.service.MediaSubscriptionService;
 import cn.har01d.alist_tvbox.service.PianDanService;
 import cn.har01d.alist_tvbox.service.SubscriptionService;
+import cn.har01d.alist_tvbox.service.acquire.MediaAcquireService;
+import cn.har01d.alist_tvbox.service.acquire.MediaIdentity;
 import cn.har01d.alist_tvbox.tvbox.Category;
 import cn.har01d.alist_tvbox.tvbox.CategoryList;
 import cn.har01d.alist_tvbox.tvbox.MovieDetail;
@@ -151,7 +154,7 @@ public class MediaLibraryController {
         for (MovieDetail item : tmdb.getList()) {
             item.setVod_pic(mediaSubscriptionService.absoluteClientCover(item.getVod_pic()));
             item.setVod_remarks(subscribedRemarks(item.getVod_remarks(),
-                    mediaSubscriptionService.isSubscribedTitle(uid, item.getVod_name(), subscriptions)));
+                    isSubscribedPianDanItem(uid, item, subscriptions)));
             merged.add(item);
         }
         MovieList result = new MovieList();
@@ -179,11 +182,24 @@ public class MediaLibraryController {
             MovieDetail copy = copyDetail(item);
             copy.setVod_pic(mediaSubscriptionService.absoluteClientCover(copy.getVod_pic()));
             copy.setVod_remarks(subscribedRemarks(copy.getVod_remarks(),
-                    mediaSubscriptionService.isSubscribedTitle(uid, copy.getVod_name(), subscriptions)));
+                    isSubscribedPianDanItem(uid, copy, subscriptions)));
             items.add(copy);
         }
         result.setList(items);
         return result;
+    }
+
+    private boolean isSubscribedPianDanItem(int uid, MovieDetail item, List<MediaSubscription> subscriptions) {
+        if (item != null && StringUtils.startsWith(item.getVod_id(), PianDanService.TMDB_PREFIX)) {
+            try {
+                if (MediaIdentity.parse(item.getVod_id()).isMovie()) {
+                    return false;
+                }
+            } catch (IllegalArgumentException e) {
+                return false;
+            }
+        }
+        return mediaSubscriptionService.isSubscribedTitle(uid, item.getVod_name(), subscriptions);
     }
 
     /** 片单条目详情:元数据直取(TMDB)/豆瓣条目本地库唯一匹配富化(无匹配回落仅标题),带「加入追剧」伪播放线路。 */
@@ -199,19 +215,22 @@ public class MediaLibraryController {
 
     private Object pianDanDetail(int uid, String id) {
         MovieDetail detail;
+        MediaIdentity identity = null;
         if (id.startsWith(PianDanService.TMDB_PREFIX)) {
-            String[] parts = id.split(":");
-            if (parts.length < 3) {
+            try {
+                identity = MediaIdentity.parse(id);
+            } catch (IllegalArgumentException e) {
                 throw new BadRequestException("无效的片单条目: " + id);
             }
             try {
-                detail = copyDetail(pianDanService.tmdbDetail(parts[1], Integer.parseInt(parts[2])));
+                detail = copyDetail(pianDanService.tmdbDetail(identity.mediaType(), Integer.parseInt(identity.id())));
             } catch (NumberFormatException e) {
-                throw new BadRequestException("无效的片单条目: " + id);
+                throw new BadRequestException("无效的片单条目: " + id, e);
             }
             if (detail == null) {
                 throw new BadRequestException("片单条目信息获取失败: " + id);
             }
+            detail.setVod_id(identity.key());
         } else if (id.startsWith(PianDanService.DOUBAN_SUBJECT_PREFIX)) {
             // db:{豆瓣id}:本地库 id 直取,未收录的榜单新片回落 rexxar 在线解析(命中短缓存实例,拷贝防污染)
             int doubanId = parseDoubanSubjectId(id);
@@ -239,7 +258,8 @@ public class MediaLibraryController {
         } else {
             throw new BadRequestException("无效的片单条目: " + id);
         }
-        boolean subscribed = mediaSubscriptionService.isSubscribedTitle(uid, detail.getVod_name());
+        boolean subscribed = identity == null || identity.isTv()
+                && mediaSubscriptionService.isSubscribedTitle(uid, detail.getVod_name());
         detail.setVod_pic(mediaSubscriptionService.absoluteClientCover(detail.getVod_pic()));
         detail.setVod_remarks(subscribedRemarks(detail.getVod_remarks(), subscribed));
         detail.setVod_play_from("片单");
@@ -257,7 +277,10 @@ public class MediaLibraryController {
                 .append("#🔍 全局搜索$")
                 .append(MediaSubscriptionService.SEARCH_PLAY_PREFIX)
                 .append(java.net.URLEncoder.encode(detail.getVod_name(), java.nio.charset.StandardCharsets.UTF_8));
-        if (detail.getExt() instanceof List<?> seasons && !seasons.isEmpty()) {
+        if (identity != null && identity.isMovie()) {
+            playUrl.append("#⬇ 获取/播放$")
+                    .append(MediaAcquireService.ACQUIRE_PLAY_PREFIX).append(encoded);
+        } else if (detail.getExt() instanceof List<?> seasons && !seasons.isEmpty()) {
             // 多季剧按季展开:每季一条目(已追季为取消项),单点直达「追剧·第5季」
             for (Object season : seasons) {
                 int number = ((Number) season).intValue();
