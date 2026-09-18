@@ -362,6 +362,39 @@ class MediaSubscriptionMagnetFallbackTest {
     }
 
     @Test
+    void doubanMetaIdDoesNotCreateTmdbEpisodeMediaKey() {
+        MediaSubscription subscription = subscription();
+        subscription.setMetaProvider("douban");
+        subscription.setMetaId("1399");
+        Message magnet = matchedMagnet(3);
+        when(telegramService.searchMagnets(anyString(), anyInt())).thenReturn(List.of(magnet));
+        when(offlineDownloadService.submitMagnet(anyString(), eq(9), eq(3), anyInt()))
+                .thenReturn(MagnetSubmitResult.submitted("已提交,等待网盘下载"));
+
+        service.magnetFallback(subscription, Set.of(3), 5);
+
+        verify(offlineDownloadService).submitMagnet(anyString(), eq(9), eq(3), anyInt());
+        verify(offlineDownloadService, never()).submitMagnet(anyString(), eq(9), eq(3), anyInt(), anyString());
+    }
+
+    @Test
+    void aliasMatchedMagnetReachesPolicyAndSubmit() {
+        MediaSubscription subscription = subscription();
+        subscription.setAliases("别名");
+        Message magnet = matchedMagnet(3);
+        magnet.setContent("别名 - 03 4K");
+        magnet.setLink("magnet:?xt=urn:btih:alias&dn="
+                + URLEncoder.encode("别名 - 03 4K", StandardCharsets.UTF_8));
+        when(telegramService.searchMagnets(anyString(), anyInt())).thenReturn(List.of(magnet));
+        when(offlineDownloadService.submitMagnet(anyString(), eq(9), eq(3), anyInt()))
+                .thenReturn(MagnetSubmitResult.submitted("已提交,等待网盘下载"));
+
+        service.magnetFallback(subscription, Set.of(3), 5);
+
+        verify(offlineDownloadService).submitMagnet(anyString(), eq(9), eq(3), anyInt());
+    }
+
+    @Test
     void cooldownsWhenNoMagnetMatches() {
         Message magnet = new Message();
         magnet.setContent("不相干的剧 - 08");

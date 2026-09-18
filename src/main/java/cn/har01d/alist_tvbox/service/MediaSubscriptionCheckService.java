@@ -4833,7 +4833,7 @@ public class MediaSubscriptionCheckService {
             }
             MediaAcquireCandidate candidate = new MediaAcquireCandidate("subscription", title, message.getLink(), info);
             MediaAcquirePolicy.Score mediaScore = mediaAcquirePolicy.scoreTv(
-                    subscription.getName(), subscription.getSeason(), episode, candidate);
+                    "", subscription.getSeason(), episode, candidate);
             if (!mediaScore.accepted()) {
                 log.info("skip magnet candidate for subscription {} episode {}: reasons={}",
                         subscription.getId(), episode, mediaScore.reasons());
@@ -4864,7 +4864,7 @@ public class MediaSubscriptionCheckService {
                 return false;
             }
             attempts++;
-            String mediaKey = MediaIdentity.episodeKey("tmdb", "tv", subscription.getMetaId(),
+            String mediaKey = MediaIdentity.episodeKey(subscription.getMetaProvider(), "tv", subscription.getMetaId(),
                     subscription.getSeason(), episode);
             cn.har01d.alist_tvbox.model.MagnetSubmitResult result = StringUtils.isBlank(mediaKey)
                     ? offlineDownloadService.submitMagnet(message.getLink(), subscription.getId(), episode,

@@ -27,6 +27,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.YearMonth;
@@ -259,15 +260,41 @@ public class OfflineDownloadService {
             log.debug("media task status reconciliation unavailable: {}", e.getMessage());
             return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
         }
+        if (remoteStatus == null) {
+            return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
+        }
         if (remoteStatus == OfflineDownloadHandler.TaskStatus.FAILED) {
             task.setStatus(STATUS_FAILED);
             task.setUpdatedTime(Instant.now());
             offlineDownloadTaskRepository.save(task);
             return new MediaTaskReconcile(MediaTaskState.FAILED, task);
         }
+        if (remoteStatus == OfflineDownloadHandler.TaskStatus.ABSENT) {
+            if (StringUtils.isNotBlank(task.getTaskName())) {
+                ProductLookup lookup = findOfflineProduct(account,
+                        new OfflineDownloadHandler.TaskResult(task.getTaskName(), task.getInfoHash(), task.isFolder()));
+                if (!lookup.available()) {
+                    return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
+                }
+                if (lookup.product() != null) {
+                    return completeMediaTask(task,
+                            new OfflineDownloadHandler.TaskResult(task.getTaskName(), task.getInfoHash(), task.isFolder()),
+                            account, lookup.product());
+                }
+            }
+            if (absentBeyondGracePeriod(task)) {
+                task.setStatus(STATUS_FAILED);
+                task.setUpdatedTime(Instant.now());
+                offlineDownloadTaskRepository.save(task);
+                return new MediaTaskReconcile(MediaTaskState.FAILED, task);
+            }
+            return new MediaTaskReconcile(MediaTaskState.ABSENT, task);
+        }
+        if (remoteStatus == OfflineDownloadHandler.TaskStatus.RUNNING) {
+            return new MediaTaskReconcile(MediaTaskState.RUNNING, task);
+        }
         if (remoteStatus != OfflineDownloadHandler.TaskStatus.SUCCEEDED) {
-            return new MediaTaskReconcile(remoteStatus == OfflineDownloadHandler.TaskStatus.RUNNING
-                    ? MediaTaskState.RUNNING : MediaTaskState.ABSENT, task);
+            return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
         }
 
         Optional<OfflineDownloadHandler.TaskResult> remoteResult;
@@ -283,17 +310,23 @@ public class OfflineDownloadService {
         if (result == null || StringUtils.isBlank(result.taskName())) {
             return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
         }
-        Optional<Product> product = findOfflineProduct(account, result);
-        if (product.isEmpty()) {
+        ProductLookup product = findOfflineProduct(account, result);
+        if (!product.available() || product.product() == null) {
             // A successful remote phase can arrive before the AList directory is visible.
             return new MediaTaskReconcile(MediaTaskState.UNKNOWN, task);
         }
 
+        return completeMediaTask(task, result, account, product.product());
+    }
+
+    private MediaTaskReconcile completeMediaTask(OfflineDownloadTask task,
+                                                 OfflineDownloadHandler.TaskResult result,
+                                                 DriverAccount account, Product product) {
         Instant now = Instant.now();
         task.setInfoHash(StringUtils.firstNonBlank(result.infoHash(), task.getInfoHash()));
-        task.setTaskName(product.get().name());
-        task.setTargetPath(buildTargetPath(account, product.get().name()));
-        task.setFolder(product.get().folder());
+        task.setTaskName(product.name());
+        task.setTargetPath(buildTargetPath(account, product.name()));
+        task.setFolder(product.folder());
         task.setStatus(STATUS_COMPLETED);
         task.setCompletedTime(now);
         task.setUpdatedTime(now);
@@ -301,24 +334,30 @@ public class OfflineDownloadService {
         return new MediaTaskReconcile(MediaTaskState.COMPLETED, task);
     }
 
-    private Optional<Product> findOfflineProduct(DriverAccount account, OfflineDownloadHandler.TaskResult result) {
+    private boolean absentBeyondGracePeriod(OfflineDownloadTask task) {
+        return task.getCreatedTime() != null
+                && !task.getCreatedTime().isAfter(Instant.now().minus(Duration.ofMinutes(2)));
+    }
+
+    private ProductLookup findOfflineProduct(DriverAccount account, OfflineDownloadHandler.TaskResult result) {
         if (aListService == null || siteService == null) {
-            return Optional.empty();
+            return new ProductLookup(null, false);
         }
         try {
             FsResponse listing = aListService.listFiles(siteService.getById(1), buildRootPath(account), 1, 0, true);
             if (listing == null || listing.getFiles() == null) {
-                return Optional.empty();
+                return new ProductLookup(null, false);
             }
             for (FsInfo file : listing.getFiles()) {
                 if (file != null && result.taskName().equals(file.getName())) {
-                    return Optional.of(new Product(file.getName(), file.getType() == 1 || result.folder()));
+                    return new ProductLookup(new Product(file.getName(), file.getType() == 1 || result.folder()), true);
                 }
             }
         } catch (Exception e) {
             log.debug("media task product listing unavailable: {}", e.getMessage());
+            return new ProductLookup(null, false);
         }
-        return Optional.empty();
+        return new ProductLookup(null, true);
     }
 
     public enum MediaTaskState {
@@ -329,6 +368,9 @@ public class OfflineDownloadService {
     }
 
     private record Product(String name, boolean folder) {
+    }
+
+    private record ProductLookup(Product product, boolean available) {
     }
 
     /** Unified media acquire entry point; keeps the existing OfflineDownloadTask state machine. */

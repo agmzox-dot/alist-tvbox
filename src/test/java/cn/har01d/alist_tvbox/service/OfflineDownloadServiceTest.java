@@ -23,6 +23,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -464,6 +465,74 @@ class OfflineDownloadServiceTest {
 
         assertEquals(OfflineDownloadService.MediaTaskState.FAILED, result.state());
         assertEquals("FAILED", task.getStatus());
+        verify(offlineDownloadTaskRepository).save(task);
+    }
+
+    @Test
+    void absentMediaTaskWithinGracePeriodRemainsPending() {
+        DriverAccount account = account(12, DriverType.PAN115, "3425588780152254335");
+        enableConfig(account);
+        OfflineDownloadTask task = new OfflineDownloadTask();
+        task.setAccountId(12);
+        task.setMediaKey("tmdb:movie:27205");
+        task.setInfoHash("hash");
+        task.setStatus("PENDING");
+        task.setCreatedTime(Instant.now().minusSeconds(60));
+        when(pan115Handler.taskStatus(account, "hash", null)).thenReturn(OfflineDownloadHandler.TaskStatus.ABSENT);
+
+        OfflineDownloadService.MediaTaskReconcile result = service.reconcileMediaTask(task);
+
+        assertEquals(OfflineDownloadService.MediaTaskState.ABSENT, result.state());
+        assertEquals("PENDING", task.getStatus());
+        verify(offlineDownloadTaskRepository, never()).save(any());
+    }
+
+    @Test
+    void absentMediaTaskAfterGracePeriodBecomesFailed() {
+        DriverAccount account = account(12, DriverType.PAN115, "3425588780152254335");
+        enableConfig(account);
+        OfflineDownloadTask task = new OfflineDownloadTask();
+        task.setAccountId(12);
+        task.setMediaKey("tmdb:movie:27205");
+        task.setInfoHash("hash");
+        task.setStatus("PENDING");
+        task.setCreatedTime(Instant.now().minusSeconds(121));
+        when(pan115Handler.taskStatus(account, "hash", null)).thenReturn(OfflineDownloadHandler.TaskStatus.ABSENT);
+        when(offlineDownloadTaskRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        OfflineDownloadService.MediaTaskReconcile result = service.reconcileMediaTask(task);
+
+        assertEquals(OfflineDownloadService.MediaTaskState.FAILED, result.state());
+        assertEquals("FAILED", task.getStatus());
+        verify(offlineDownloadTaskRepository).save(task);
+    }
+
+    @Test
+    void absentMediaTaskWithVisibleProductIsCompleted() {
+        DriverAccount account = account(12, DriverType.PAN115, "3425588780152254335");
+        enableConfig(account);
+        OfflineDownloadTask task = new OfflineDownloadTask();
+        task.setAccountId(12);
+        task.setMediaKey("tmdb:movie:27205");
+        task.setInfoHash("hash");
+        task.setTaskName("电影.mkv");
+        task.setStatus("PENDING");
+        task.setCreatedTime(Instant.now().minusSeconds(121));
+        when(pan115Handler.taskStatus(account, "hash", "电影.mkv"))
+                .thenReturn(OfflineDownloadHandler.TaskStatus.ABSENT);
+        FsInfo product = new FsInfo();
+        product.setName("电影.mkv");
+        FsResponse response = new FsResponse();
+        response.setFiles(List.of(product));
+        when(siteService.getById(1)).thenReturn(new cn.har01d.alist_tvbox.entity.Site());
+        when(aListService.listFiles(any(), any(), anyInt(), anyInt(), anyBoolean())).thenReturn(response);
+        when(offlineDownloadTaskRepository.save(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        OfflineDownloadService.MediaTaskReconcile result = service.reconcileMediaTask(task);
+
+        assertEquals(OfflineDownloadService.MediaTaskState.COMPLETED, result.state());
+        assertEquals("COMPLETED", task.getStatus());
+        assertEquals("/115云盘/😲我的115云盘/alist-tvbox-offline/电影.mkv", task.getTargetPath());
         verify(offlineDownloadTaskRepository).save(task);
     }
 
