@@ -160,7 +160,7 @@ public class OfflineCleanupService {
     }
 
     private boolean mediaOwned(OfflineDownloadTask task) {
-        return StringUtils.isNotBlank(task.getMediaKey());
+        return StringUtils.isNotBlank(task.getMediaKey()) && task.getSubscriptionId() == null;
     }
 
     /**

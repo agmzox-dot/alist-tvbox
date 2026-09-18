@@ -369,6 +369,27 @@ class OfflineCleanupServiceTest {
         assertEquals(null, task.getCleanupState());
     }
 
+    @Test
+    void subscriptionMediaKeyStillUsesSubscriptionCleanup() {
+        enable(true, 24, false);
+        OfflineDownloadTask task = task("COMPLETED", 9, "产物");
+        task.setMediaKey("tmdb:tv:1399:s1:e3");
+        when(taskRepository.findCleanupCandidates(12)).thenReturn(List.of(task));
+        MediaSubscriptionResource row = mountedRow(9, "产物");
+        when(resourceRepository.findByLink("offline:产物")).thenReturn(List.of(row));
+        MediaSubscription sub = subscription(9);
+        when(subscriptionRepository.findById(9)).thenReturn(Optional.of(sub));
+        when(episodeSourceRepository.findNumbersByResourceIdAndStatesIn(row.getId(),
+                List.of(MediaSubscriptionEpisodeSource.STATE_LISTED, MediaSubscriptionEpisodeSource.STATE_VERIFIED)))
+                .thenReturn(List.of(1, 2, 3));
+        when(checkService.watchedEpisode(sub)).thenReturn(3);
+
+        service.dailyCleanup();
+
+        verify(checkService).watchedEpisode(sub);
+        verify(handler).deleteTask(account, HASH, "产物", true);
+    }
+
     // ---------- COMPLETED:msub 行 ----------
 
     @Test
